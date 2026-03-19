@@ -28,6 +28,23 @@ def get_board_type_from_compile_commands() -> Optional[str]:
             return cmd.split("-DBOARD_TYPE=\\\"")[1].split("\\\"")[0].strip()
     return None
 
+def get_current_target() -> Optional[str]:
+    """Parse the current IDF_TARGET from build/config/sdkconfig.h or sdkconfig"""
+    # Try sdkconfig first
+    sdkconfig = Path("sdkconfig")
+    if sdkconfig.exists():
+        with sdkconfig.open(encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("CONFIG_IDF_TARGET="):
+                    return line.split('"')[1]
+    # Try build/config/sdkconfig.h
+    sdkconfig_h = Path("build/config/sdkconfig.h")
+    if sdkconfig_h.exists():
+        with sdkconfig_h.open(encoding='utf-8') as f:
+            for line in f:
+                if "#define CONFIG_IDF_TARGET" in line:
+                    return line.split('"')[1]
+    return None
 
 def get_project_version() -> Optional[str]:
     """Read set(PROJECT_VER "x.y.z") from root CMakeLists.txt"""
@@ -273,10 +290,33 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
 
         os.environ.pop("IDF_TARGET", None)
 
-        # Call set-target
-        if os.system(f"idf.py set-target {target}") != 0:
-            print("set-target failed", file=sys.stderr)
-            sys.exit(1)
+        # Check if set-target is needed
+        current_target = get_current_target()
+        current_board = get_board_type_from_compile_commands()
+        
+        # Determine if we need to clean sdkconfig
+        need_clean_config = False
+        if current_target != target:
+            print(f"Changing target from {current_target} to {target}")
+            # Call set-target
+            if os.system(f"idf.py set-target {target}") != 0:
+                print("set-target failed", file=sys.stderr)
+                sys.exit(1)
+        elif current_board != board_type:
+            # Same chip but different board, need to clean sdkconfig to avoid config accumulation
+            print(f"Changing board from {current_board} to {board_type} (same target: {target})")
+            print("Cleaning sdkconfig to avoid config accumulation...")
+            need_clean_config = True
+            # Remove old sdkconfig to start fresh
+            sdkconfig_path = Path("sdkconfig")
+            if sdkconfig_path.exists():
+                sdkconfig_path.unlink()
+            # Re-run set-target to create fresh sdkconfig
+            if os.system(f"idf.py set-target {target}") != 0:
+                print("set-target failed", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(f"Target already set to {target}, board already set to {board_type}, skipping set-target")
 
         # Append sdkconfig
         with Path("sdkconfig").open("a", encoding='utf-8') as f:
